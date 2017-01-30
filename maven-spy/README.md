@@ -1,0 +1,1 @@
+mvn -Dmaven.ext.class.path=/Users/cleclerc/.m2/repository/org/jenkins-ci/plugins/pipeline-maven-spy/0.6-SNAPSHOT/pipeline-maven-spy-0.6-SNAPSHOT.jar clean

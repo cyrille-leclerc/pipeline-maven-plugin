@@ -27,10 +27,13 @@ package org.jenkinsci.plugins.pipeline.maven;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.io.Serializable;
+import java.net.URL;
 import java.nio.charset.Charset;
+import java.security.CodeSource;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -42,6 +45,9 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
 
 import org.apache.commons.lang.StringUtils;
 import org.jenkinsci.lib.configprovider.model.Config;
@@ -75,8 +81,9 @@ import hudson.tasks._maven.MavenConsoleAnnotator;
 import hudson.util.ArgumentListBuilder;
 import jenkins.model.*;
 import org.jenkinsci.plugins.workflow.steps.StepExecution;
+import org.w3c.dom.Document;
 
-@SuppressFBWarnings(value="SE_TRANSIENT_FIELD_NOT_RESTORED", justification="Contextual fields used only in start(); no onResume needed")
+@SuppressFBWarnings(value = "SE_TRANSIENT_FIELD_NOT_RESTORED", justification = "Contextual fields used only in start(); no onResume needed")
 class WithMavenStepExecution extends StepExecution {
 
     private static final long serialVersionUID = 1L;
@@ -148,7 +155,7 @@ class WithMavenStepExecution extends StepExecution {
 
     /**
      * Detects if this step is running inside <tt>docker.image()</tt>
-     * 
+     * <p>
      * This has the following implications:
      * <li>Tool intallers do no work, as they install in the host, see:
      * https://issues.jenkins-ci.org/browse/JENKINS-36159
@@ -156,11 +163,11 @@ class WithMavenStepExecution extends StepExecution {
      * container running the <tt>sh</tt> command for maven This is due to the fact that <tt>docker.image()</tt> all it
      * does is decorate the launcher and excute the command with a <tt>docker run</tt> which means that the inherited
      * environment from the OS will be totally different eg: MAVEN_HOME, JAVA_HOME, PATH, etc.
-     * 
+     *
+     * @return true if running inside docker container with <tt>docker.image()</tt>
      * @see <a href=
      * "https://github.com/jenkinsci/docker-workflow-plugin/blob/master/src/main/java/org/jenkinsci/plugins/docker/workflow/WithContainerStep.java#L213">
      * WithContainerStep</a>
-     * @return true if running inside docker container with <tt>docker.image()</tt>
      */
     private boolean detectWithContainer() {
         Launcher launcher1 = launcher;
@@ -186,8 +193,8 @@ class WithMavenStepExecution extends StepExecution {
                     throw new AbortException("Could not find the JDK installation: " + step.getJdk() + ". Make sure it is configured on the Global Tool Configuration page");
                 }
                 Node node = getComputer().getNode();
-                if (node == null){
-                    throw new AbortException("Could not obtain the Node for the computer: " + getComputer().getName());    
+                if (node == null) {
+                    throw new AbortException("Could not obtain the Node for the computer: " + getComputer().getName());
                 }
                 jdk = jdk.forNode(node, listener).forEnvironment(env);
                 jdk.buildEnvVars(envOverride);
@@ -217,7 +224,8 @@ class WithMavenStepExecution extends StepExecution {
         }
 
         FilePath mvnExec = new FilePath(ws.getChannel(), mvnExecPath);
-        String content = mavenWrapperContent(mvnExec, setupSettingFile(), setupGlobalSettingFile(), setupMavenLocalRepo());
+        FilePath mavenSpyJarPath = setupMavenSpy();
+        String content = mavenWrapperContent(mvnExec, setupSettingFile(), setupGlobalSettingFile(), setupMavenLocalRepo(), mavenSpyJarPath);
 
         createWrapperScript(tempBinDir, mvnExec.getName(), content);
 
@@ -231,6 +239,36 @@ class WithMavenStepExecution extends StepExecution {
             }
             envOverride.put(MAVEN_OPTS, mavenOpts.replaceAll("[\t\r\n]+", " "));
         }
+    }
+
+    private FilePath setupMavenSpy() throws IOException, InterruptedException {
+        if (tempBinDir == null) {
+            throw new IllegalStateException("tempBinDir not defined");
+        }
+
+         // Mostly for testing / debugging in the IDE
+        final String MAVEN_SPY_JAR_URL = "org.jenkinsci.plugins.pipeline.maven.mavenSpyJarUrl";
+        String mavenSpyJarUrl = System.getProperty(MAVEN_SPY_JAR_URL);
+        InputStream in;
+        if (mavenSpyJarUrl == null) {
+            String embeddedMavenSpyJarPath = "/META-INF/lib/pipeline-maven-spy.jar";
+            LOGGER.log(Level.FINE, "Load embedded maven spy jar " + embeddedMavenSpyJarPath);
+            // Don't use Thread.currentThread().getContextClassLoader() as it doesn't show the resources of the plugin
+            ClassLoader classLoader = WithMavenStepExecution.class.getClassLoader();
+            LOGGER.log(Level.FINE, "Load " + embeddedMavenSpyJarPath + " using classloader " + classLoader.getClass() + ": " + classLoader);
+            in = classLoader.getResourceAsStream(embeddedMavenSpyJarPath);
+            if (in == null) {
+                throw new IllegalStateException("Embedded maven spy jar not found at " + embeddedMavenSpyJarPath + " in the pipeline-maven-plugin classpath using classloader " + classLoader.getClass() + ": " + classLoader +
+                        "Maven Spy Jar URL can be defined with the system property: '" + MAVEN_SPY_JAR_URL + "'");
+            }
+        } else {
+            LOGGER.log(Level.FINE, "Load maven spy jar provided by system property '" + MAVEN_SPY_JAR_URL + "': " + mavenSpyJarUrl);
+            in = new URL(mavenSpyJarUrl).openStream();
+        }
+
+        FilePath mavenSpyJarFilePath = tempBinDir.child("pipeline-maven-spy.jar");
+        mavenSpyJarFilePath.copyFrom(in);
+        return mavenSpyJarFilePath;
     }
 
     private String obtainMavenExec() throws AbortException, IOException, InterruptedException {
@@ -263,10 +301,10 @@ class WithMavenStepExecution extends StepExecution {
 
         if (mi != null) {
             console.println("Using Maven Installation " + mi.getName());
-            
+
             Node node = getComputer().getNode();
-            if (node == null){
-                throw new AbortException("Could not obtain the Node for the computer: " + getComputer().getName());    
+            if (node == null) {
+                throw new AbortException("Could not obtain the Node for the computer: " + getComputer().getName());
             }
             mi = mi.forNode(node, listener).forEnvironment(env);
             mi.buildEnvVars(envOverride);
@@ -286,12 +324,12 @@ class WithMavenStepExecution extends StepExecution {
                 if (mavenHome != null) {
                     LOGGER.log(Level.FINE, "Found maven installation on {0}", mavenHome);
                     // Resort to maven installation to get the executable and build environment
-                    mi = new MavenInstallation("Mave Auto-discovered", mavenHome, null);
+                    mi = new MavenInstallation("Maven Auto-discovered", mavenHome, null);
                     mi.buildEnvVars(envOverride);
                     mvnExecPath = mi.getExecutable(launcher);
                 }
             } else { // in case of docker.image we need to execute a command through the decorated launcher and get the
-                     // output.
+                // output.
                 LOGGER.fine("Calling printenv on docker container...");
                 String mavenHome = readFromProcess("printenv", MAVEN_HOME);
                 if (mavenHome == null) {
@@ -330,7 +368,7 @@ class WithMavenStepExecution extends StepExecution {
     /**
      * Executes a command and reads the result to a string. It uses the launcher to run the command to make sure the
      * launcher decorator is used ie. docker.image step
-     * 
+     *
      * @param args command arguments
      * @return output from the command
      * @throws InterruptedException if interrupted
@@ -353,15 +391,16 @@ class WithMavenStepExecution extends StepExecution {
 
     /**
      * Generates the content of the maven wrapper script that works
-     * 
-     * @param mvnExec maven executable location
-     * @param settingsFile settings file
+     *
+     * @param mvnExec            maven executable location
+     * @param settingsFile       settings file
      * @param globalSettingsFile global settings file
-     * @param mavenLocalRepo maven local repo location
+     * @param mavenLocalRepo     maven local repo location
+     * @param mavenSpyJarPath    path to the maven-spy jar
      * @return wrapper script content
      * @throws AbortException when problems creating content
      */
-    private String mavenWrapperContent(FilePath mvnExec, String settingsFile, String globalSettingsFile, String mavenLocalRepo) throws AbortException {
+    private String mavenWrapperContent(FilePath mvnExec, String settingsFile, String globalSettingsFile, String mavenLocalRepo, @Nullable FilePath mavenSpyJarPath) throws AbortException {
 
         ArgumentListBuilder argList = new ArgumentListBuilder(mvnExec.getRemote());
 
@@ -384,6 +423,11 @@ class WithMavenStepExecution extends StepExecution {
         argList.add("--batch-mode");
         argList.add("--show-version");
 
+        if (mavenSpyJarPath != null) {
+            argList.add("-Dmaven.ext.class.path=\"" + mavenSpyJarPath.getRemote() + "\"");
+            argList.add("-Dorg.jenkinsci.plugins.pipeline.maven.reportsFolder=\"" + this.tempBinDir.getRemote() + "\"");
+        }
+
         StringBuilder c = new StringBuilder();
 
         if (isUnix) {
@@ -402,13 +446,13 @@ class WithMavenStepExecution extends StepExecution {
 
     /**
      * Creates the actual wrapper script file and sets the permissions.
-     * 
+     *
      * @param tempBinDir dir to create the script file on
-     * @param name the script file name
-     * @param content contents of the file
+     * @param name       the script file name
+     * @param content    contents of the file
      * @return
      * @throws InterruptedException when processing remote calls
-     * @throws IOException when reading files
+     * @throws IOException          when reading files
      */
     private FilePath createWrapperScript(FilePath tempBinDir, String name, String content) throws IOException, InterruptedException {
         FilePath scriptFile = tempBinDir.child(name);
@@ -421,10 +465,10 @@ class WithMavenStepExecution extends StepExecution {
 
     /**
      * Sets the maven repo location according to the provided parameter on the agent
-     * 
+     *
      * @return path on the build agent to the repo
      * @throws InterruptedException when processing remote calls
-     * @throws IOException when reading files
+     * @throws IOException          when reading files
      */
     private String setupMavenLocalRepo() throws IOException, InterruptedException {
         if (!StringUtils.isEmpty(step.getMavenLocalRepo())) {
@@ -441,10 +485,10 @@ class WithMavenStepExecution extends StepExecution {
      * Obtains the selected setting file, and initializes MVN_SETTINGS When the selected file is an absolute path, the
      * file existence is checked on the build agent, if not found, it will be checked and copied from the master. The
      * file will be generated/copied to the workspace temp folder to make sure docker container can access it.
-     * 
+     *
      * @return the settings file path on the agent
      * @throws InterruptedException when processing remote calls
-     * @throws IOException when reading files
+     * @throws IOException          when reading files
      */
     private String setupSettingFile() throws IOException, InterruptedException {
         final FilePath settingsDest = tempBinDir.child("settings.xml");
@@ -461,11 +505,11 @@ class WithMavenStepExecution extends StepExecution {
             // file from agent
             if ((settings = new FilePath(ws.getChannel(), settingsPath)).exists()) {
                 console.format("Using settings from: %s on build agent%n", settingsPath);
-                LOGGER.log(Level.FINE, "Copying file from build agent {0} to {1}", new Object[] { settings, settingsDest });
+                LOGGER.log(Level.FINE, "Copying file from build agent {0} to {1}", new Object[]{settings, settingsDest});
                 settings.copyTo(settingsDest);
             } else if ((settings = new FilePath(new File(settingsPath))).exists()) { // File from the master
                 console.format("Using settings from: %s on master%n", settingsPath);
-                LOGGER.log(Level.FINE, "Copying file from master to build agent {0} to {1}", new Object[] { settings, settingsDest });
+                LOGGER.log(Level.FINE, "Copying file from master to build agent {0} to {1}", new Object[]{settings, settingsDest});
                 settings.copyTo(settingsDest);
             } else {
                 throw new AbortException("Could not find file '" + settingsPath + "' on the build agent nor the master");
@@ -474,14 +518,16 @@ class WithMavenStepExecution extends StepExecution {
             return settingsDest.getRemote();
         }
         return null;
-    }    /**
+    }
+
+    /**
      * Obtains the selected global setting file, and initializes GLOBAL_MVN_SETTINGS When the selected file is an absolute path, the
      * file existence is checked on the build agent, if not found, it will be checked and copied from the master. The
      * file will be generated/copied to the workspace temp folder to make sure docker container can access it.
      *
      * @return the global settings file path on the agent
      * @throws InterruptedException when processing remote calls
-     * @throws IOException when reading files
+     * @throws IOException          when reading files
      */
     private String setupGlobalSettingFile() throws IOException, InterruptedException {
         final FilePath settingsDest = tempBinDir.child("globalSettings.xml");
@@ -498,11 +544,11 @@ class WithMavenStepExecution extends StepExecution {
             // file from agent
             if ((settings = new FilePath(ws.getChannel(), settingsPath)).exists()) {
                 console.format("Using global settings from: %s on build agent%n", settingsPath);
-                LOGGER.log(Level.FINE, "Copying file from build agent {0} to {1}", new Object[] { settings, settingsDest });
+                LOGGER.log(Level.FINE, "Copying file from build agent {0} to {1}", new Object[]{settings, settingsDest});
                 settings.copyTo(settingsDest);
             } else if ((settings = new FilePath(new File(settingsPath))).exists()) { // File from the master
                 console.format("Using global settings from: %s on master%n", settingsPath);
-                LOGGER.log(Level.FINE, "Copying file from master to build agent {0} to {1}", new Object[] { settings, settingsDest });
+                LOGGER.log(Level.FINE, "Copying file from master to build agent {0} to {1}", new Object[]{settings, settingsDest});
                 settings.copyTo(settingsDest);
             } else {
                 throw new AbortException("Could not find file '" + settingsPath + "' on the build agent nor the master");
@@ -516,9 +562,9 @@ class WithMavenStepExecution extends StepExecution {
     /**
      * Reads the config file from Config File Provider, expands the credentials and stores it in a file on the temp
      * folder to use it with the maven wrapper script
-     * 
+     *
      * @param settingsConfigId config file id from Config File Provider
-     * @param settingsFile path to write te content to
+     * @param settingsFile     path to write te content to
      * @return the {@link FilePath} to the settings file
      * @throws AbortException in case of error
      */
@@ -566,7 +612,7 @@ class WithMavenStepExecution extends StepExecution {
      * folder to use it with the maven wrapper script
      *
      * @param globalSettingsConfigId global config file id from Config File Provider
-     * @param globalSettingsFile path to write te content to
+     * @param globalSettingsFile     path to write te content to
      * @return the {@link FilePath} to the settings file
      * @throws AbortException in case of error
      */
@@ -624,7 +670,9 @@ class WithMavenStepExecution extends StepExecution {
         public OutputStream decorateLogger(AbstractBuild _ignore, final OutputStream logger)
                 throws IOException, InterruptedException {
             return new MavenConsoleAnnotator(logger, Charset.forName(charset));
-        };
+        }
+
+        ;
     }
 
     /**
@@ -652,7 +700,9 @@ class WithMavenStepExecution extends StepExecution {
      * Callback to cleanup tmp script after finishing the job
      */
     private static class Callback extends BodyExecutionCallback.TailCall {
-        FilePath tempBinDir;
+        private final FilePath tempBinDir;
+
+        private final MavenSpyLogProcessor mavenSpyLogProcessor = new MavenSpyLogProcessor();
 
         public Callback(FilePath tempBinDir) {
             this.tempBinDir = tempBinDir;
@@ -660,11 +710,13 @@ class WithMavenStepExecution extends StepExecution {
 
         @Override
         protected void finished(StepContext context) throws Exception {
+            mavenSpyLogProcessor.processMavenSpyLogs(context, tempBinDir);
+
             try {
                 tempBinDir.deleteRecursive();
             } catch (IOException | InterruptedException e) {
+                BuildListener listener = context.get(BuildListener.class);
                 try {
-                    TaskListener listener = context.get(TaskListener.class);
                     if (e instanceof IOException) {
                         Util.displayIOException((IOException) e, listener); // Better IOException display on windows
                     }
@@ -694,11 +746,12 @@ class WithMavenStepExecution extends StepExecution {
 
     /**
      * Gets the computer for the current launcher.
-     * 
+     *
      * @return the computer
      * @throws AbortException in case of error.
      */
-    private @Nonnull Computer getComputer() throws AbortException {
+    private @Nonnull
+    Computer getComputer() throws AbortException {
         if (computer != null) {
             return computer;
         }
@@ -734,7 +787,7 @@ class WithMavenStepExecution extends StepExecution {
 
     /**
      * Calculates a temporary dir path
-     * 
+     *
      * @param ws current workspace
      * @return the temporary dir
      */
