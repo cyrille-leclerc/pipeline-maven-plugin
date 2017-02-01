@@ -31,9 +31,12 @@ import org.codehaus.plexus.util.xml.Xpp3Dom;
 import org.codehaus.plexus.util.xml.Xpp3DomWriter;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -67,7 +70,7 @@ public class FileMavenEventReporter implements MavenEventReporter {
 
         String now = new SimpleDateFormat("yyyyMMdd-HHmmss-S").format(new Date());
         outFile = new File(reportsFolder, "maven-spy-" + now + ".log");
-        out = new PrintWriter(new FileWriter(outFile));
+        out = new PrintWriter(new OutputStreamWriter(new FileOutputStream(outFile), "UTF-8"));
         xmlWriter = new PrettyPrintXMLWriter(out);
         xmlWriter.startElement("mavenExecution");
         xmlWriter.addAttribute("_time", new Timestamp(System.currentTimeMillis()).toString());

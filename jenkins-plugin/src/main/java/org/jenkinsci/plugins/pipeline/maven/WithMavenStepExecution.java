@@ -251,15 +251,20 @@ class WithMavenStepExecution extends StepExecution {
         String mavenSpyJarUrl = System.getProperty(MAVEN_SPY_JAR_URL);
         InputStream in;
         if (mavenSpyJarUrl == null) {
-            String embeddedMavenSpyJarPath = "/META-INF/lib/pipeline-maven-spy.jar";
-            LOGGER.log(Level.FINE, "Load embedded maven spy jar " + embeddedMavenSpyJarPath);
+            String embeddedMavenSpyJarPath = "META-INF/lib/pipeline-maven-spy.jar";
+            LOGGER.log(Level.FINE, "Load embedded maven spy jar '" + embeddedMavenSpyJarPath + "'");
             // Don't use Thread.currentThread().getContextClassLoader() as it doesn't show the resources of the plugin
-            ClassLoader classLoader = WithMavenStepExecution.class.getClassLoader();
+            Class<WithMavenStepExecution> clazz = WithMavenStepExecution.class;
+            ClassLoader classLoader = clazz.getClassLoader();
             LOGGER.log(Level.FINE, "Load " + embeddedMavenSpyJarPath + " using classloader " + classLoader.getClass() + ": " + classLoader);
             in = classLoader.getResourceAsStream(embeddedMavenSpyJarPath);
             if (in == null) {
-                throw new IllegalStateException("Embedded maven spy jar not found at " + embeddedMavenSpyJarPath + " in the pipeline-maven-plugin classpath using classloader " + classLoader.getClass() + ": " + classLoader +
-                        "Maven Spy Jar URL can be defined with the system property: '" + MAVEN_SPY_JAR_URL + "'");
+                CodeSource codeSource = clazz.getProtectionDomain().getCodeSource();
+                String msg = "Embedded maven spy jar not found at " + embeddedMavenSpyJarPath + " in the pipeline-maven-plugin classpath. " +
+                        "Maven Spy Jar URL can be defined with the system property: '" + MAVEN_SPY_JAR_URL + "'" +
+                        "Classloader " + classLoader.getClass() + ": " + classLoader + ". " +
+                        "Class " + clazz.getName() + " loaded from " + (codeSource == null ? "#unknown#" : codeSource.getLocation());
+                throw new IllegalStateException(msg);
             }
         } else {
             LOGGER.log(Level.FINE, "Load maven spy jar provided by system property '" + MAVEN_SPY_JAR_URL + "': " + mavenSpyJarUrl);

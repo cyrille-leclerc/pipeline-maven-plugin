@@ -129,7 +129,7 @@ public class JenkinsMavenEventSpy extends AbstractEventSpy {
         } catch (Throwable t) {
             blackList.add(event.getClass());
             System.err.println("Exception processing " + event);
-            reporter.print("Exception processing " + event);
+            reporter.print(getClass().getName() + ": Exception processing " + event);
             t.printStackTrace();
         }
     }

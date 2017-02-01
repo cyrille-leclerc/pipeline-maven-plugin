@@ -27,13 +27,14 @@ package org.jenkinsci.plugins.pipeline.maven.eventspy.handler;
 import org.apache.maven.execution.ExecutionEvent;
 import org.jenkinsci.plugins.pipeline.maven.eventspy.reporter.MavenEventReporter;
 
+import java.util.Collections;
 import java.util.List;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 /**
- * Don't report this event
+ * Don't generate an entry in the report for {@link ExecutionEvent.Type#SessionEnded}
  *
  * @author <a href="mailto:cleclerc@cloudbees.com">Cyrille Le Clerc</a>
  */
@@ -51,7 +52,7 @@ public class SessionEndedHandler extends AbstractExecutionHandler {
     @Nonnull
     @Override
     protected List<String> getConfigurationParametersToReport(ExecutionEvent executionEvent) {
-        return null;
+        return Collections.emptyList();
     }
 
     @Nullable
